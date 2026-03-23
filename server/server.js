@@ -2,16 +2,15 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
-import { createDeck, canPlay, applyCardEffect } from './gameLogic.js';
+import { createDeck, canPlay, applyCardEffect, shuffle } from './gameLogic.js'; // added shuffle import
 
 const app = express();
 app.use(cors({
-  origin: ['https://joyful-profiterole-dfae99.netlify.app/', 'http://localhost:3000/']
+  origin: ['https://rainbow-tartufo-1953ce.netlify.app', 'http://localhost:3000'] // use your actual Netlify URL, no trailing slash
 }));
 app.use(express.json());
 
 const httpServer = createServer(app);
-
 const io = new Server(httpServer, {
   cors: {
     origin: '*',
@@ -89,7 +88,7 @@ function nextTurn(skipPlayer = false) {
 
   // Check if game is over
   const currentPlayer = gameState.players[gameState.currentPlayerIndex];
-  if (currentPlayer.hand.length === 0) {
+  if (currentPlayer && currentPlayer.hand.length === 0) {
     gameState.winner = currentPlayer;
     gameState.gameStarted = false;
   }
@@ -101,7 +100,6 @@ io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
   socket.on('joinGame', ({ name, lobbyName }) => {
-
     // ... validation ...
     if (gameState.players.length === 0 && lobbyName) {
       gameState.lobbyName = lobbyName;
@@ -125,12 +123,26 @@ io.on('connection', (socket) => {
     gameState.players.push(newPlayer);
     socket.join('game');
 
-    // Send current game state to new player
-    const privateState = {
-      hand: newPlayer.hand,
-      ...gameState
+    // Send public state + player's own hand (avoid leaking other players' hands)
+    const publicState = {
+      players: gameState.players.map(p => ({
+        id: p.id,
+        name: p.name,
+        handCount: p.hand.length,
+        ready: p.ready,
+        isCurrentPlayer: p.id === gameState.players[gameState.currentPlayerIndex]?.id
+      })),
+      currentPlayerIndex: gameState.currentPlayerIndex,
+      direction: gameState.direction,
+      gameStarted: gameState.gameStarted,
+      winner: gameState.winner,
+      topCard: gameState.discardPile[gameState.discardPile.length - 1],
+      lastWildChosenColor: gameState.lastWildChosenColor,
+      lobbyName: gameState.lobbyName
     };
-    socket.emit('gameState', privateState);
+    socket.emit('gameState', publicState);
+    socket.emit('yourHand', { hand: newPlayer.hand });
+
     broadcastGameState();
   });
 
@@ -257,9 +269,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
-httpServer.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
