@@ -5,10 +5,13 @@ import cors from 'cors';
 import { createDeck, canPlay, applyCardEffect } from './gameLogic.js';
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: ['https://joyful-profiterole-dfae99.netlify.app/', 'http://localhost:3000/']
+}));
 app.use(express.json());
 
 const httpServer = createServer(app);
+
 const io = new Server(httpServer, {
   cors: {
     origin: '*',
@@ -18,14 +21,15 @@ const io = new Server(httpServer, {
 
 // Game state
 let gameState = {
-  players: [],        // { id, name, hand, ready }
+  players: [],
   deck: [],
   discardPile: [],
   currentPlayerIndex: 0,
-  direction: 1,      // 1 = clockwise, -1 = counter-clockwise
+  direction: 1,
   gameStarted: false,
   winner: null,
-  lastWildChosenColor: null
+  lastWildChosenColor: null,
+  lobbyName: ''   // <-- new
 };
 
 // Maximum players increased to 10
@@ -45,7 +49,8 @@ function broadcastGameState() {
     gameStarted: gameState.gameStarted,
     winner: gameState.winner,
     topCard: gameState.discardPile[gameState.discardPile.length - 1],
-    lastWildChosenColor: gameState.lastWildChosenColor
+    lastWildChosenColor: gameState.lastWildChosenColor,
+    lobbyName: gameState.lobbyName
   };
   io.emit('gameState', publicState);
 }
@@ -54,7 +59,7 @@ function dealCards() {
   const deck = createDeck();
   gameState.deck = deck;
   gameState.discardPile = [];
-  
+
   // Deal 7 cards to each player
   for (let player of gameState.players) {
     player.hand = [];
@@ -62,7 +67,7 @@ function dealCards() {
       player.hand.push(gameState.deck.pop());
     }
   }
-  
+
   // Initial discard
   let topCard = gameState.deck.pop();
   while (topCard.type === 'wild') {
@@ -70,7 +75,7 @@ function dealCards() {
     topCard = gameState.deck.pop();
   }
   gameState.discardPile.push(topCard);
-  
+
   // Determine starting player (first in list)
   gameState.currentPlayerIndex = 0;
   gameState.direction = 1;
@@ -81,21 +86,27 @@ function nextTurn(skipPlayer = false) {
     gameState.currentPlayerIndex = (gameState.currentPlayerIndex + gameState.direction + gameState.players.length) % gameState.players.length;
   }
   gameState.currentPlayerIndex = (gameState.currentPlayerIndex + gameState.direction + gameState.players.length) % gameState.players.length;
-  
+
   // Check if game is over
   const currentPlayer = gameState.players[gameState.currentPlayerIndex];
   if (currentPlayer.hand.length === 0) {
     gameState.winner = currentPlayer;
     gameState.gameStarted = false;
   }
-  
+
   broadcastGameState();
 }
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
-  
-  socket.on('joinGame', ({ name }) => {
+
+  socket.on('joinGame', ({ name, lobbyName }) => {
+
+    // ... validation ...
+    if (gameState.players.length === 0 && lobbyName) {
+      gameState.lobbyName = lobbyName;
+    }
+
     if (gameState.gameStarted) {
       socket.emit('error', { message: 'Game already in progress' });
       return;
@@ -104,7 +115,7 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: `Game is full (max ${MAX_PLAYERS} players)` });
       return;
     }
-    
+
     const newPlayer = {
       id: socket.id,
       name: name || `Player ${gameState.players.length + 1}`,
@@ -113,7 +124,7 @@ io.on('connection', (socket) => {
     };
     gameState.players.push(newPlayer);
     socket.join('game');
-    
+
     // Send current game state to new player
     const privateState = {
       hand: newPlayer.hand,
@@ -122,24 +133,24 @@ io.on('connection', (socket) => {
     socket.emit('gameState', privateState);
     broadcastGameState();
   });
-  
+
   socket.on('startGame', () => {
     if (gameState.players.length < 2) {
       socket.emit('error', { message: 'Need at least 2 players' });
       return;
     }
     if (gameState.gameStarted) return;
-    
+
     dealCards();
     gameState.gameStarted = true;
     broadcastGameState();
-    
+
     // Send full hand to each player
     for (let player of gameState.players) {
       io.to(player.id).emit('yourHand', { hand: player.hand });
     }
   });
-  
+
   socket.on('playCard', ({ card, chosenColor }) => {
     const player = gameState.players.find(p => p.id === socket.id);
     if (!player || !gameState.gameStarted) return;
@@ -147,20 +158,20 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Not your turn' });
       return;
     }
-    
+
     const topCard = gameState.discardPile[gameState.discardPile.length - 1];
     if (!canPlay(card, topCard)) {
       socket.emit('error', { message: 'Invalid move' });
       return;
     }
-    
+
     // Remove card from hand
-    const cardIndex = player.hand.findIndex(c => 
+    const cardIndex = player.hand.findIndex(c =>
       JSON.stringify(c) === JSON.stringify(card)
     );
     if (cardIndex === -1) return;
     player.hand.splice(cardIndex, 1);
-    
+
     // Apply special effects
     let skipNext = false;
     if (card.type === 'wild') {
@@ -174,10 +185,10 @@ io.on('connection', (socket) => {
       const effect = applyCardEffect(card, gameState, gameState.currentPlayerIndex);
       skipNext = effect.skipNext;
     }
-    
+
     // Add to discard pile
     gameState.discardPile.push(card);
-    
+
     // Check win
     if (player.hand.length === 0) {
       gameState.winner = player;
@@ -185,14 +196,14 @@ io.on('connection', (socket) => {
       broadcastGameState();
       return;
     }
-    
+
     // Move to next player
     nextTurn(skipNext);
-    
+
     // Send updated hand to player
     io.to(socket.id).emit('yourHand', { hand: player.hand });
   });
-  
+
   socket.on('drawCard', () => {
     const player = gameState.players.find(p => p.id === socket.id);
     if (!player || !gameState.gameStarted) return;
@@ -200,17 +211,17 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Not your turn' });
       return;
     }
-    
+
     if (gameState.deck.length === 0) {
       // Reshuffle discard pile except top card
       const topCard = gameState.discardPile.pop();
       gameState.deck = shuffle([...gameState.discardPile]);
       gameState.discardPile = [topCard];
     }
-    
+
     const drawnCard = gameState.deck.pop();
     player.hand.push(drawnCard);
-    
+
     // Check if drawn card can be played
     const topCard = gameState.discardPile[gameState.discardPile.length - 1];
     if (canPlay(drawnCard, topCard)) {
@@ -218,10 +229,10 @@ io.on('connection', (socket) => {
     } else {
       nextTurn(false);
     }
-    
+
     io.to(socket.id).emit('yourHand', { hand: player.hand });
   });
-  
+
   socket.on('callUno', () => {
     const player = gameState.players.find(p => p.id === socket.id);
     if (player && player.hand.length === 1) {
@@ -229,7 +240,7 @@ io.on('connection', (socket) => {
       socket.emit('unoCalled', { message: 'UNO!' });
     }
   });
-  
+
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
     const index = gameState.players.findIndex(p => p.id === socket.id);
@@ -247,7 +258,7 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
-}); 
+});
 
 httpServer.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
