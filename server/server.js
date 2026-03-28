@@ -2,12 +2,12 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
-import { createDeck, canPlay, applyCardEffect, shuffle } from './gameLogic.js'; // added shuffle import
+import { createDeck, canPlay, applyCardEffect, shuffle } from './gameLogic.js';
 import { randomUUID } from 'crypto';
 
 const app = express();
 app.use(cors({
-  origin: ['https://rainbow-tartufo-1953ce.netlify.app', 'http://localhost:3000'] // use your actual Netlify URL, no trailing slash
+  origin: ['https://rainbow-tartufo-1953ce.netlify.app', 'http://localhost:3000']
 }));
 app.use(express.json());
 
@@ -29,10 +29,9 @@ let gameState = {
   gameStarted: false,
   winner: null,
   lastWildChosenColor: null,
-  lobbyName: ''   // <-- new
+  lobbyName: ''
 };
 
-// Maximum players increased to 10
 const MAX_PLAYERS = 10;
 
 function broadcastGameState() {
@@ -60,7 +59,6 @@ function dealCards() {
   gameState.deck = deck;
   gameState.discardPile = [];
 
-  // Deal 7 cards to each player
   for (let player of gameState.players) {
     player.hand = [];
     for (let i = 0; i < 7; i++) {
@@ -68,7 +66,6 @@ function dealCards() {
     }
   }
 
-  // Initial discard
   let topCard = gameState.deck.pop();
   while (topCard.type === 'wild') {
     gameState.deck.unshift(topCard);
@@ -76,7 +73,6 @@ function dealCards() {
   }
   gameState.discardPile.push(topCard);
 
-  // Determine starting player (first in list)
   gameState.currentPlayerIndex = 0;
   gameState.direction = 1;
 }
@@ -87,7 +83,6 @@ function nextTurn(skipPlayer = false) {
   }
   gameState.currentPlayerIndex = (gameState.currentPlayerIndex + gameState.direction + gameState.players.length) % gameState.players.length;
 
-  // Check if game is over
   const currentPlayer = gameState.players[gameState.currentPlayerIndex];
   if (currentPlayer && currentPlayer.hand.length === 0) {
     gameState.winner = currentPlayer;
@@ -100,12 +95,41 @@ function nextTurn(skipPlayer = false) {
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  socket.on('joinGame', ({ name, lobbyName }) => {
-    // ... validation ...
-    if (gameState.players.length === 0 && lobbyName) {
-      gameState.lobbyName = lobbyName;
+  socket.on('joinGame', ({ name, lobbyName, token }) => {
+    // 1. Check for reconnection using token
+    if (token) {
+      const existingPlayer = gameState.players.find(p => p.token === token);
+      if (existingPlayer) {
+        // Reconnected player: update socket.id
+        existingPlayer.id = socket.id;
+        socket.join('game');
+
+        // Send current public state and player's hand
+        const publicState = {
+          players: gameState.players.map(p => ({
+            id: p.id,
+            name: p.name,
+            handCount: p.hand.length,
+            ready: p.ready,
+            isCurrentPlayer: p.id === gameState.players[gameState.currentPlayerIndex]?.id
+          })),
+          currentPlayerIndex: gameState.currentPlayerIndex,
+          direction: gameState.direction,
+          gameStarted: gameState.gameStarted,
+          winner: gameState.winner,
+          topCard: gameState.discardPile[gameState.discardPile.length - 1],
+          lastWildChosenColor: gameState.lastWildChosenColor,
+          lobbyName: gameState.lobbyName
+        };
+        socket.emit('gameState', publicState);
+        socket.emit('yourHand', { hand: existingPlayer.hand });
+
+        broadcastGameState(); // Notify others (optional)
+        return;
+      }
     }
 
+    // 2. New player
     if (gameState.gameStarted) {
       socket.emit('error', { message: 'Game already in progress' });
       return;
@@ -115,16 +139,21 @@ io.on('connection', (socket) => {
       return;
     }
 
+    const newToken = randomUUID();
     const newPlayer = {
       id: socket.id,
       name: name || `Player ${gameState.players.length + 1}`,
       hand: [],
-      ready: false
+      ready: false,
+      token: newToken
     };
     gameState.players.push(newPlayer);
     socket.join('game');
 
-    // Send public state + player's own hand (avoid leaking other players' hands)
+    if (gameState.players.length === 1 && lobbyName) {
+      gameState.lobbyName = lobbyName;
+    }
+
     const publicState = {
       players: gameState.players.map(p => ({
         id: p.id,
@@ -143,6 +172,7 @@ io.on('connection', (socket) => {
     };
     socket.emit('gameState', publicState);
     socket.emit('yourHand', { hand: newPlayer.hand });
+    socket.emit('setToken', { token: newToken });
 
     broadcastGameState();
   });
@@ -158,7 +188,6 @@ io.on('connection', (socket) => {
     gameState.gameStarted = true;
     broadcastGameState();
 
-    // Send full hand to each player
     for (let player of gameState.players) {
       io.to(player.id).emit('yourHand', { hand: player.hand });
     }
@@ -178,14 +207,12 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Remove card from hand
     const cardIndex = player.hand.findIndex(c =>
       JSON.stringify(c) === JSON.stringify(card)
     );
     if (cardIndex === -1) return;
     player.hand.splice(cardIndex, 1);
 
-    // Apply special effects
     let skipNext = false;
     if (card.type === 'wild') {
       card.chosenColor = chosenColor;
@@ -199,10 +226,8 @@ io.on('connection', (socket) => {
       skipNext = effect.skipNext;
     }
 
-    // Add to discard pile
     gameState.discardPile.push(card);
 
-    // Check win
     if (player.hand.length === 0) {
       gameState.winner = player;
       gameState.gameStarted = false;
@@ -210,10 +235,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Move to next player
     nextTurn(skipNext);
-
-    // Send updated hand to player
     io.to(socket.id).emit('yourHand', { hand: player.hand });
   });
 
@@ -226,7 +248,6 @@ io.on('connection', (socket) => {
     }
 
     if (gameState.deck.length === 0) {
-      // Reshuffle discard pile except top card
       const topCard = gameState.discardPile.pop();
       gameState.deck = shuffle([...gameState.discardPile]);
       gameState.discardPile = [topCard];
@@ -235,7 +256,6 @@ io.on('connection', (socket) => {
     const drawnCard = gameState.deck.pop();
     player.hand.push(drawnCard);
 
-    // Check if drawn card can be played
     const topCard = gameState.discardPile[gameState.discardPile.length - 1];
     if (canPlay(drawnCard, topCard)) {
       socket.emit('canPlayDrawnCard', { card: drawnCard });
@@ -249,22 +269,15 @@ io.on('connection', (socket) => {
   socket.on('callUno', () => {
     const player = gameState.players.find(p => p.id === socket.id);
     if (player && player.hand.length === 1) {
-      // Mark that UNO was called
       socket.emit('unoCalled', { message: 'UNO!' });
     }
   });
 
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
-    const index = gameState.players.findIndex(p => p.id === socket.id);
-    if (index !== -1) {
-      gameState.players.splice(index, 1);
-      if (gameState.gameStarted && gameState.players.length < 2) {
-        gameState.gameStarted = false;
-        gameState.winner = null;
-      }
-      broadcastGameState();
-    }
+    // Do NOT remove the player – they may reconnect later.
+    // Optionally, you could set a timeout to clean up after X minutes,
+    // but for simplicity we keep them.
   });
 });
 
