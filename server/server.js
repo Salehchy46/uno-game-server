@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import { createDeck, canPlay, applyCardEffect, shuffle } from './gameLogic.js'; // added shuffle import
+import { randomUUID } from 'crypto';
 
 const app = express();
 app.use(cors({
